@@ -5,6 +5,9 @@
  * first-run name prompt, then routes between capability views (cards on Home).
  * Navigation drives Telegram's NATIVE back button via a small back-stack
  * (see nav.tsx) — no in-app navigation bar. All logic lives in app/api/*.
+ *
+ * Deep-link navigation: bot commands open the Mini App with ?view=<ViewKey>
+ * so students land directly on the requested section.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, setupViewport, tg } from "./tg";
@@ -32,6 +35,11 @@ export type ViewKey =
   | "students"
   | "retakes";
 
+const VALID_VIEWS: ViewKey[] = [
+  "grade", "results", "leaderboard", "competition",
+  "register", "manage", "students", "retakes",
+];
+
 interface Me {
   id: number;
   name: string;
@@ -43,21 +51,21 @@ interface Me {
 }
 
 const TITLES: Record<ViewKey, string> = {
-  home: "",
-  grade: "📝 الامتحانات",
-  results: "📊 نتائجي",
+  home:        "",
+  grade:       "📝 الامتحانات",
+  results:     "📊 نتائجي",
   leaderboard: "🏆 التصنيف",
   competition: "🎯 المسابقات",
-  register: "📝 تسجيل امتحان",
-  manage: "📚 الامتحانات",
-  students: "👤 الطلاب",
-  retakes: "🙏 طلبات الإعادة",
+  register:    "📝 تسجيل امتحان",
+  manage:      "📚 الامتحانات",
+  students:    "👤 الطلاب",
+  retakes:     "🙏 طلبات الإعادة",
 };
 
 export default function Page() {
-  const [me, setMe] = useState<Me | null>(null);
+  const [me,    setMe]    = useState<Me | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<ViewKey>("home");
+  const [view,  setView]  = useState<ViewKey>("home");
 
   // Native back-button stack: each screen pushes a "go back" handler.
   const backStack = useRef<(() => void)[]>([]);
@@ -74,7 +82,18 @@ export default function Page() {
 
   useEffect(() => {
     setupViewport();
-    api<Me>("/api/me").then(setMe).catch((e) => setError(e.message));
+    api<Me>("/api/me")
+      .then((meData) => {
+        setMe(meData);
+        // Deep-link: bot commands open the app with ?view=<ViewKey>.
+        // Read it once on first load and navigate to the requested section.
+        const params    = new URLSearchParams(window.location.search);
+        const deepLink  = params.get("view") as ViewKey | null;
+        if (deepLink && VALID_VIEWS.includes(deepLink)) {
+          setView(deepLink);
+        }
+      })
+      .catch((e) => setError(e.message));
   }, []);
 
   // Wire the native back button once; it always invokes the top of the stack.
@@ -99,9 +118,10 @@ export default function Page() {
   }, [view, push]);
 
   if (error) return <main className="wrap"><div className="state state-error">⚠️ {error}</div></main>;
-  if (!me) return <main className="wrap"><Loader text="جارٍ التحميل..." /></main>;
+  if (!me)   return <main className="wrap"><Loader text="جارٍ التحميل..." /></main>;
 
-  if (me.gated) return <main className="wrap"><JoinGate channel={me.channel} /></main>;
+  if (me.gated)
+    return <main className="wrap"><JoinGate channel={me.channel} /></main>;
   if (!me.isAdmin && !me.hasName)
     return <main className="wrap"><NameGate onSaved={(name) => setMe({ ...me, name, hasName: true })} /></main>;
 
@@ -110,25 +130,19 @@ export default function Page() {
       <main className="wrap">
         {view === "home" && <ResultToast />}
         {/* leaderboard renders its own animated hero header instead of the title */}
-        {view !== "home" && view !== "leaderboard" && <h1 className="page-title">{TITLES[view]}</h1>}
-
-        {view === "home" && (
-          <Home
-            isAdmin={me.isAdmin}
-            name={me.name}
-            balance={me.balance}
-            photoUrl={tg()?.initDataUnsafe?.user?.photo_url || null}
-            onNavigate={setView}
-          />
+        {view !== "home" && view !== "leaderboard" && (
+          <h1 className="page-title">{TITLES[view]}</h1>
         )}
-        {view === "grade" && <Grade />}
-        {view === "results" && <MyResults />}
+
+        {view === "home"        && <Home isAdmin={me.isAdmin} name={me.name} balance={me.balance} photoUrl={tg()?.initDataUnsafe?.user?.photo_url || null} onNavigate={setView} />}
+        {view === "grade"       && <Grade />}
+        {view === "results"     && <MyResults />}
         {view === "leaderboard" && <Leaderboard />}
         {view === "competition" && <Competition isAdmin={me.isAdmin} />}
-        {view === "register" && <RegisterExam onDone={() => setView("home")} />}
-        {view === "manage" && <ManageExams />}
-        {view === "students" && <Students />}
-        {view === "retakes" && <Retakes />}
+        {view === "register"    && <RegisterExam onDone={() => setView("home")} />}
+        {view === "manage"      && <ManageExams />}
+        {view === "students"    && <Students />}
+        {view === "retakes"     && <Retakes />}
       </main>
     </NavContext.Provider>
   );
@@ -153,8 +167,8 @@ function JoinGate({ channel }: { channel: { username: string } }) {
 }
 
 function NameGate({ onSaved }: { onSaved: (name: string) => void }) {
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [name,  setName]  = useState("");
+  const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function save() {
