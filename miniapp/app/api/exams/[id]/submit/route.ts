@@ -23,7 +23,7 @@ import {
   ledgerBalance,
 } from "@/lib/db";
 import { buildGradingPrompt, normalizeGradingResult, type GradingResult } from "@/lib/prompts";
-import { visionJSON, imagePart, MODELS, type ContentPart } from "@/lib/gemini";
+import { visionJSON, imagePart, isConfigured, MODELS, type ContentPart } from "@/lib/gemini";
 import { saveImage, newGroup } from "@/lib/uploads";
 import { speedBonus, loyaltyBonus } from "@/lib/scoring";
 
@@ -39,6 +39,14 @@ export async function POST(
   const user = authUser(req);
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
+  // Early check — fail fast before reading uploaded files.
+  if (!isConfigured()) {
+    return NextResponse.json(
+      { error: "خدمة الذكاء الاصطناعي غير مهيأة. تواصل مع المشرف." },
+      { status: 503 },
+    );
+  }
+
   const { id: examId } = await params;
   const exam = getExam(examId);
   if (!exam || !exam.row.is_active) {
@@ -48,14 +56,14 @@ export async function POST(
   const isTest = user.isAdmin;
 
   // One real attempt per exam (unless a retake was granted).
-  const prior = isTest ? null : lastSubmissionForExam(examId, user.id);
+  const prior      = isTest ? null : lastSubmissionForExam(examId, user.id);
   const usingRetake = !!prior && hasRetake(examId, user.id);
   if (prior && !usingRetake) {
     return NextResponse.json(
       {
-        error: "أجبتَ عن هذا الامتحان من قبل.",
+        error:   "أجبتَ عن هذا الامتحان من قبل.",
         already: true,
-        score: { awarded: prior.score_awarded, max: prior.score_max },
+        score:   { awarded: prior.score_awarded, max: prior.score_max },
       },
       { status: 409 },
     );
@@ -69,7 +77,8 @@ export async function POST(
       .getAll("photos")
       .filter((f): f is File => f instanceof File && f.size > 0)
       .slice(0, MAX_PHOTOS);
-  } catch {
+  } catch (err) {
+    console.error("[submit] formData failed:", (err as any)?.message ?? err);
     return NextResponse.json({ error: "تعذّر قراءة الصور المرفوعة." }, { status: 400 });
   }
   if (!files.length) {
@@ -82,6 +91,7 @@ export async function POST(
   try {
     saved = await Promise.all(files.map((f, i) => saveImage(f, group, i)));
   } catch (err) {
+    console.error("[submit] saveImage failed:", (err as any)?.message ?? err);
     return NextResponse.json(
       { error: "تعذّر حفظ الصور. تأكد أنها صور صحيحة وأعد المحاولة." },
       { status: 400 },
@@ -99,45 +109,40 @@ export async function POST(
     const raw = await visionJSON<GradingResult>(MODELS.grading(), prompt, parts);
     if (!raw?.questions?.length) throw new Error("empty grading result");
     result = normalizeGradingResult(exam.key, raw);
-  } catch (err) {
-    console.error("[submit] grading failed:", (err as any)?.message ?? err);
+  } catch (err: any) {
+    console.error("[submit] grading failed:", err?.message ?? err);
     return NextResponse.json(
       { error: "تعذّر قراءة ورقتك بوضوح. أعد تصويرها بإضاءة جيدة وأعد المحاولة." },
       { status: 422 },
     );
   }
 
-  const base = result.total_awarded;
-  const speed = isTest
-    ? { points: 0, pct: 0 }
-    : speedBonus(base, submittedAt, exam.row.created_at);
-  const loyalty = isTest
-    ? { points: 0, pct: 0, streak: 0 }
-    : loyaltyBonus(base, user.id, examId);
+  const base    = result.total_awarded;
+  const speed   = isTest ? { points: 0, pct: 0 }           : speedBonus(base, submittedAt, exam.row.created_at);
+  const loyalty = isTest ? { points: 0, pct: 0, streak: 0 } : loyaltyBonus(base, user.id, examId);
 
-  const studentName = resolveName(getUser(user.id), user.id);
+  const studentName  = resolveName(getUser(user.id), user.id);
   const submissionId = recordSubmission({
     examId,
-    userId: user.id,
-    username: user.username ?? null,
+    userId:        user.id,
+    username:      user.username ?? null,
     studentName,
-    photoPaths: saved.map((s) => s.rel),
+    photoPaths:    saved.map((s) => s.rel),
     isTest,
-    scoreAwarded: base,
-    scoreMax: result.total_max,
-    speedBonus: speed.points,
-    loyaltyBonus: loyalty.points,
+    scoreAwarded:  base,
+    scoreMax:      result.total_max,
+    speedBonus:    speed.points,
+    loyaltyBonus:  loyalty.points,
     result,
   });
 
   if (!isTest) {
-    // Retake replaces the previous attempt and its ledger entries.
     if (usingRetake) {
       reverseExamLedger(examId, user.id);
       consumeRetake(examId, user.id);
       replaceOldSubmissions(examId, user.id, submissionId);
     }
-    postLedger(user.id, base, "exam_base", examId, submittedAt);
+    postLedger(user.id, base,                       "exam_base",  examId, submittedAt);
     postLedger(user.id, speed.points + loyalty.points, "exam_bonus", examId, submittedAt);
   }
 
@@ -146,11 +151,11 @@ export async function POST(
     result,
     isTest,
     bonus: {
-      speed: { points: speed.points, pct: speed.pct },
+      speed:   { points: speed.points,   pct: speed.pct },
       loyalty: { points: loyalty.points, pct: loyalty.pct, streak: loyalty.streak },
-      total: Math.round((speed.points + loyalty.points) * 10) / 10,
+      total:   Math.round((speed.points + loyalty.points) * 10) / 10,
     },
     pointsEarned: Math.round((base + speed.points + loyalty.points) * 10) / 10,
-    balance: ledgerBalance(user.id),
+    balance:      ledgerBalance(user.id),
   });
 }
