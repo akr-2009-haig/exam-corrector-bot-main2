@@ -2,9 +2,9 @@
  * Forced channel membership ("join gate").
  *
  * Every non-admin interaction is allowed only when the user is a member of
- * the required channel (config.requiredChannelId). Results are cached so we
- * don't call getChatMember on every message; the "تحقّقت" button forces a
- * fresh check so a user who just joined gets through immediately.
+ * the required channel (config.requiredChannelId). The check is performed
+ * live on every interaction — no caching — so the moment a user leaves the
+ * channel they are locked out immediately.
  *
  * The bot must be an ADMIN of the channel; if the check itself fails (e.g.
  * misconfigured channel), we FAIL OPEN with a log warning rather than locking
@@ -19,8 +19,7 @@ export const CB_CHECK_JOIN = "chkjoin";
 
 /**
  * Is the user a member of the required channel?
- * NO caching — checked live against Telegram on EVERY operation, so the
- * moment a user leaves the channel the bot locks for them again.
+ * Checked live against Telegram on EVERY call (no caching).
  */
 export async function isChannelMember(
   telegram: Telegram,
